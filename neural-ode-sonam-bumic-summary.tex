@@ -1,0 +1,205 @@
+%\documentclass{article}
+\documentclass[10pt,a4paper]{article}
+\usepackage[top=30pt,bottom=30pt,left=48pt,right=46pt]{geometry}
+\usepackage[utf8]{inputenc}
+\usepackage{authblk}
+\usepackage{amssymb}
+\usepackage{amsmath}
+\usepackage{amsfonts}
+\usepackage{tikz}
+\usepackage{blindtext}
+\usepackage{background}
+\usepackage{comment}
+\usepackage{enumitem}  % description bullet points
+
+\usepackage{a4wide}
+
+
+
+\title{Neural Ordinary Differential Equations \\
+       \large A Summary by Sonam Ghosh \thanks{sonamg@bu.edu}}
+\author[]{Ricky T.Q. Chen \thanks{rtqichen@cs.toronto.edu}}
+\author[]{Yulia Rubanova \thanks{rubanova@cs.toronto.edu}}
+\author[]{Jesse Bettencourt \thanks{jessebett@cs.toronto.edu}}
+\author[]{David Duvenaud \thanks {duvenaud@cs.toronto.edu}}
+\affil[]{University of Toronto, Vector Institute}
+\date{January 15, 2019}
+
+% Puts logo on every page
+\backgroundsetup{
+   scale=1,
+   angle=0,
+   opacity=1,
+   color=black,
+   contents={\begin{tikzpicture}[remember picture, overlay]
+      \node at ([xshift=-2cm,yshift=-2cm] current page.north east)
+            {\includegraphics[width = 3cm]{bumic-logo.png}} %
+     \end{tikzpicture}}
+ }
+
+
+\begin{document}
+
+\maketitle
+%%%%%%%%%%%%%%%%%%%%%
+\begin{comment}
+% Logo 
+ %   \begin{tikzpicture}[remember picture,overlay]
+  %  \node[anchor=north west,yshift=-1.5pt,xshift=1pt]%
+   %     at (current page.north west)
+    %    {\includegraphics[]{bumic-logo.png}};
+    %\end{tikzpicture}
+
+%%%%%%%%%%%%%%%%%%%%%%
+
+\end{comment}
+
+
+\section{Introduction}
+
+\begin{description}[font=$\bullet$~\normalfont\scshape\color{blue!50!black}]
+\item [Hidden State Transformation] - Normal transformation that happens in residual networks, recurrent neural network decoders, and normalizing flows and is also the euler discretization of a continuous transformation iteratively
+\begin{equation}
+    \textbf{h}_{t+1} = \textbf{h}_{t} + f(\textbf{h}_{t}, \theta_{t})
+\end{equation}
+\item [Ordinary Differential Equation Neural Network] - parameterizing the dynamics of hidden units with an ODE when one adds more layers and smaller steps.
+\begin{equation}
+    \frac{d\textbf{h}(t)}{dt} = f(\textbf{h}(t),t, \theta)
+\end{equation}
+  \begin{itemize}
+      \item[$\circ$] Input layer --- $\textbf{h}(0)$, Output layer (solution to ODE initial value problem at time $T$) --- $\textbf{h}(T)$
+      \item[$\circ$] Given the massive work on numerical computational research, there's a ton of differential equation solvers and thus one can just compute the value using one of these solvers (I'd recommend Runge-Kutta, but more on that later)
+  \end{itemize}
+\item [Memory Efficiency] - One can train models with constant memory cost as a function of the depth due to not requiring storage of intermediate values in the forward pass
+\item [Adaptive Computation] -- Given the plethora of ODE solvers out there, one can take advantage of modern solvers which provide monitoring of error and under the hood evaluation strategy changing. Model evaluation cost scales with problem complexity. Later on I will explore two prominent ODE solvers - Runge Kutta \& Adams-Bashforth-Moulton method. 
+\item [Parameter Efficiency] - Parameterization of the hidden units as a continous function allows for parameters of nearby layers to tie together.
+\item [Scalable and invertible normalizing flows] - Change of variables becomes easier to compute. One can derive a new class of invertible density models to avoid single unit bottlenecks and directly train via maximum likelihood
+\begin{itemize}
+    \item[$\circ$] \textbf{Invertible Models} - Class of probabilistic generative models with: 
+    \begin{itemize}
+        \item[$\vartriangleright$] Exact sampling $\longrightarrow x \sim p(x) $
+        \item[$\vartriangleright$] Exact inference $\longrightarrow p(z|x) = p(z)p(x|z)/p(x)$
+        \item[$\vartriangleright$] Exact likelihood computation $\longrightarrow p(x) = \displaystyle \int p(x|z)p(z) dz$
+    \end{itemize}
+    \item[$\circ$] \textbf{Max Likelihood Training} - One common method is to optimize the loss function under a probabilistic approach via maximizing the likelihood of the data. 
+    \begin{itemize}
+        \item[$\vartriangleright$] Given a Binary Cross Entropy formula
+        \begin{equation}
+            E(y, x, \theta) = - \sum_{i=1}^{n} y_{i}\log p_{\theta} (y|x_{i}) + (1 - y_{i})\log (1 - p_{\theta})(y|x_{i})
+        \end{equation}
+        \item[$\vartriangleright$] Choose a Bernoulli distribution for example
+        \begin{equation}
+            p(y|\xi) = \prod_{i=1}^{y_{i}}\xi_{i}^{y_{i}}(1 - \xi_{i})^{1 - y_{i}}
+        \end{equation}
+        
+        \item[$\vartriangleright$] Train the neural network to estimate $\xi$ which then turns the likelihood function into
+    \begin{equation}
+        p(y|x, \theta) = \prod_{i=1}^{y_{i}} p_{\theta}(y|x_{i})^{y_{i}}(1 - p_{\theta}(y|x_{i}))^{1 - y_{i}}
+    \end{equation}
+    \item[$\vartriangleright$] Finally, maximize w.r.t $\theta$
+    \begin{equation}
+        \sum_{i=1}^{n}y_{i}\log p_{\theta}(y|x_{i}) + (1 - y_{i}) \log (1 - p_{\theta})(y - x_{i}))
+    \end{equation}
+    \end{itemize}
+    
+\end{itemize}
+\end{description}
+
+\newpage
+
+\section{Reverse-mode automatic differentiation of ODE solutions}
+
+\begin{itemize}
+    \item Biggest difficulty in training continuous depth networks is computing backpropagation through a ODE Solver.
+    \item Their method treats the ODE solver as a black box (so many solvers out there, use one) and uses a numerical technique known as the \textit{Adjoint Sensitivity Method} (Pontryagin et. al. 1962)
+    \begin{itemize}
+        \item[$\circ$]  To be brief, it's a simple substitution of variables to make solving certain linear systems easier.
+        \item[$\circ$]  Suppose you have two known matrices $\textbf{A}$ and $\textbf{C}$ and a known vector $u$ and you want to compute a specific product where
+        \begin{equation}
+            u^{T}\textbf{B} \quad \textrm{s. t.} \quad 
+            \textbf{AB} = \textbf{C}
+        \end{equation}
+        \item[$\circ$] Normally one can just solve for $\textbf{B}$ and compute the product; however, that's computationally expensive so instead find a vector $v$ where
+        \begin{equation}
+            v^{T}\textbf{C} \quad \textrm{s.t.} \quad \textbf{A}^{T}v = u
+        \end{equation}
+            \item[$\circ$] At glance, it is trivial to see the two expressions are the sample problem
+    \begin{equation}
+        v^{T}\textbf{C} = v^{T}\textbf{AB} = (\textbf{A}^{T}v)^{T}\textbf{B} = u^{T}\textbf{B}
+    \end{equation}
+    \item[$\circ$] Thus the problem is reduced to solving for a vector rather than a matrix which reduces computational complexity (this will be useful in training)
+    \end{itemize}
+
+    \item Gradients are computed via solving a second, augmented ODE backwards in time.
+    \begin{itemize}
+        \item[$\circ$] Scales linearly with problem size
+        \item[$\circ$] Low memory cost
+        \item[$\circ$] Explicit control of numerical error
+    \end{itemize}
+    \item The scalar valued loss function $L$, where in the input is the result of an ODE solver is given as (note the authors swaps out $\textbf{h}$ with $\textbf{z}$):
+    \begin{equation}
+        L(\textbf{z}(t_{1}) = L \left( \textbf{z}(t_{0}) + \int_{t_{0}}^{t_{1}} f(\textbf{z}(t), t, \theta) dt \right) = L(\textrm{ODESolve}(\textbf{z}(t_{0}), f, t_{0}, t_{1}, \theta))
+    \end{equation}
+    \item Gradients with respect to $\theta$ are needed to optimize $L$
+    \item One must examine how the gradient of the loss depends on the hidden state $\textbf{z}(t)$ for each time instant via finding the $\textit{adjoint}$ state given by
+    \begin{equation}
+        \textbf{a}(t) = \frac{\partial L }{\partial \textbf{z}(t)}
+    \end{equation}
+    \item The dynamics of the adjoint state are given by another ODE via the instantaneous analog of the chain rule:
+    \begin{equation}
+        \frac{d\textbf{a}(t)}{dt} = -\textbf{a}(t)^{T} \frac{\partial f(\textbf{z}(t), t, \theta)}{d\textbf{z}}
+    \end{equation}
+    \item $\partial L/ \partial \textbf{z}(t_{0})$ is solved from the ODE solver (ran backwards from the first value of $\partial L/ \partial \textbf{z}(t_{1})$
+    \item To combat the requirement of knowing $\textbf{z}(t)$ for the whole trajectory, one can recompute it backwards in time with the adjoint from the final value $\textbf{z}(t_{1})$
+    \item For completeness, a third integral is required to find the gradients w.r.t neural network parameters $\theta$ which requires knowledge of the hidden state $\textbf{z}(t)$ and the adjoint $\textbf{a}(t)$:
+    \begin{equation}
+        \frac{\partial L}{\partial \theta} = - \int_{t_{0}}^{t_{1}} \textbf{a}(t)^{T} \frac{\partial f(\textbf{z}(t), t, \theta}{\partial \theta} dt 
+    \end{equation}
+    
+    \item $\textbf{a}(t)^{T} \partial f / \partial \textbf{z}$ and $\textbf{a}(t)^{T} \partial f /  \partial \theta$ can be computed by automatic differentiation. 
+    \begin{itemize}
+        \item[$\circ$] \textbf{Automatic Differentiation} - general way of taking a program which computes a value and automatically constructing a procedure for computing derivatives for that value. 
+        \item[$\circ$] Different modes are available such as reverse mode and forward mode
+        \item[$\circ$] If you're using a NN framework such as PyTorch, this is method is called via "autograd"
+        \item[$\circ$] Note that automatic differentiation isn't the same as finite differences which are more computationally expensive (forward pass for each derivative needed)
+        \item[$\circ$] Linear in computational cost and numerically stable
+        \item[$\circ$] For those who use SymPy in Python or Mathematica, autodiff is not symbolic differentiation.
+        \item[$\circ$] Typically in neural network models, one will use backpropagation. The auto differentiation technique can be vectorized by computing a vector-Jacobian product (VJP):
+        \begin{equation}
+            \textbf{J} = \frac{\partial \textbf{y}}{\partial \textbf{x}} = \begin{pmatrix}
+            \frac{\partial y_{1}}{\partial x_{1}} & \hdots & \frac{\partial y_{1}}{\partial x_{n}} \\
+            \vdots & \ddots & \vdots \\
+            \frac{\partial y_{m}}{\partial x_{1}}
+            & 
+            \hdots &
+            \frac{\partial y_{m}}{\partial x_{n}}
+            \end{pmatrix}
+        \end{equation}
+        \begin{equation}
+            \bar{x}_{j} = \sum_{i} \bar{y}_{i} \frac{\partial y_{i}}{\partial x_{j}} \quad \quad \quad \quad \bar{\textbf{x}} = \bar{\textbf{y}}^{T} \textbf{J} = \textbf{J}^{T} \bar{\textbf{y}}
+        \end{equation}
+    \end{itemize}
+    \item A single call is made to the ODE solver to compute the integrals for $\textbf{z}, \textbf{a}, \frac{\partial f}{\partial \theta}$. 
+    \item The call will also concatenate the original state, the adjoint, and other partial derivatives into a single vector.
+    \item The Full algorithm is given below
+    \begin{center}
+        \includegraphics[scale=0.7]{algo1.png}
+    \end{center}
+    \newpage
+    \item The Extended version of the algorithm which includes the derivatives w.r.t $t_{0}$ and $t_{1}$ is shown below: 
+    \begin{center}
+        \includegraphics[scale=0.7]{algo2.png}
+    \end{center}
+\end{itemize}
+
+\section{Replacing residual networks with ODEs for supervised learning}
+\begin{description}[font=$\bullet$~\normalfont\scshape\color{blue!50!black}]
+    \item[Software] -  Authors use the implicit Adams method found in LSOEDE and VODE from the \texttt{scipy.integrate} package
+    \begin{itemize}
+        \item[$\circ$] LSODE - adaptive numerical methods to find a solution to an ODE
+        \item[$\circ$] VODE - package of subroutines for the numerical solution of the initial value problem for systems of first-order ordinary differential equations
+    \end{itemize}
+    
+    
+\end{description}
+\end{document}
